@@ -2,18 +2,19 @@
 
 from __future__ import absolute_import, division, print_function, unicode_literals
 
-from django.contrib.admin.options import ModelAdmin, csrf_protect_m
-from django.contrib.admin.views.main import SEARCH_VAR, ChangeList
-from django.core.exceptions import PermissionDenied
+import re
+from dateutil.parser import parse as parse_date
+from django.contrib.admin.options import ModelAdmin
+from django.contrib.admin.views.main import ChangeList, SEARCH_VAR
 from django.core.paginator import InvalidPage, Paginator
-from django.shortcuts import render
-from django.utils.encoding import force_text
-from django.utils.translation import ungettext
-
+from django.conf import settings
 from haystack import connections
 from haystack.query import SearchQuerySet
-from haystack.utils import get_model_ct_tuple
 
+try:
+    from django.utils.encoding import force_text
+except ImportError:
+    from django.utils.encoding import force_unicode as force_text
 
 def list_max_show_all(changelist):
     """
@@ -30,16 +31,121 @@ def list_max_show_all(changelist):
 
 
 class SearchChangeList(ChangeList):
-    def __init__(self, **kwargs):
+    def __init__(self, *args, **kwargs):
+        self.valid_lookups = ["contains", "exact", "gt", "gte", "lt", "lte", "in", "startswith"]
         self.haystack_connection = kwargs.pop('haystack_connection', 'default')
-        super(SearchChangeList, self).__init__(**kwargs)
+        super(SearchChangeList, self).__init__(*args, **kwargs)
+
+    def custom_get_filters(self, request):
+        """
+        So we have two dicts here that we want mapped to each other:
+            1. GET Params: {"q": "stuff", "business__id__exact": 23, "user__joined_date__lte": "2015-11-23"}
+            2. Indexed field names with other field info: {"business": <Integer field stuff stuff stuff>}
+
+        Now Haystack's SQS won't take "business__id__exact" as a filter because it doesnt know what "business__id"
+        is, it knows a "business". So a filter it will expect is "business__exact".
+        This "business" field will have a "model_attr" property that should be "business__id".
+        So, we will take the GET Params from 1., remove the lookup parameter, match the remaining key to the
+        "model_attr" property of every field from 2.
+        Got it?
+        Finally we want:
+           {"business__exact": 23, "user_joined_date__lte": "2015-11-23"}
+
+        We will also remove parameters that are not indexed, because it will only throw error and not solve anything.
+        """
+
+        model_attr__indexed_field_map = {}
+        indexed_model = connections['default'].get_unified_index().get_index(self.model)
+        for name, field in indexed_model.fields.items():
+            model_attr__indexed_field_map[field.model_attr] = name
+
+        # Convert {"q": "stuff", "business__id__exact": 23} to:
+        # [{"business__id": {"lookup": "exact", "query": 23}}
+        model_attr__lookup__query_map_list = []
+        pattern_lookup = re.compile('^.*__(.*$)')
+        for param, query in request.GET.items():
+            try:
+                lookup = pattern_lookup.findall(param)[0]
+            except IndexError:
+                lookup = False
+            finally:
+                if not lookup:
+                    if param in model_attr__indexed_field_map.values():
+                        lookup_query_map = {"lookup": param, "query": query}
+                        model_attr__lookup__query_map_list.append({param: lookup_query_map})
+                else:
+                    if lookup in self.valid_lookups:
+                        model_attr = re.sub("__{}$".format(lookup), "", param)
+                        lookup_query_map = {"lookup": lookup, "query": query}
+                        model_attr__lookup__query_map_list.append({model_attr: lookup_query_map})
+
+        # Magic
+        indexed_field__query_map = {}
+        for model_attr__lookup_query_map in model_attr__lookup__query_map_list:
+            for model_attr, lookup_query_map in model_attr__lookup_query_map.items():
+                indexed_field = model_attr__indexed_field_map.get(model_attr)
+                if indexed_field:
+                    lookup = lookup_query_map.get('lookup')
+                    query = lookup_query_map.get('query')
+                    # If its a datetime field, convert string to a datatime object, ES likes that
+
+                    # TODO: Fix this hack for datefilter
+                    if "-" in query and ":" in query:
+                        try:
+                            query = parse_date(query)
+                        except (TypeError, ValueError):
+                            pass
+                    indexed_field__query_map["{}__{}".format(indexed_field, lookup)] = query
+
+        return indexed_field__query_map
+
+    def get_ordering(self, request, queryset):
+        ordering = super(SearchChangeList, self).get_ordering(request, queryset)
+
+        if SEARCH_VAR not in request.GET or (len(request.GET[SEARCH_VAR]) is 0 and len(request.GET.keys()) is 1) \
+                or request.method == 'POST':
+            return ordering
+
+        default_pk_field = getattr(settings, 'HAYSTACK_ADMIN_DEFAULT_ORDER_BY_FIELD', None)
+        if default_pk_field:
+            indexed_model = connections['default'].get_unified_index().get_index(self.model)
+            indexed_fields = indexed_model.fields.keys()
+            sane_ordering = []
+
+            for field in ordering:
+                if field in ['-pk', '-id']:
+                    field = '-{}'.format(default_pk_field)
+                elif field in ['pk', 'id']:
+                    field = '{}'.format(default_pk_field)
+
+                abs_field = field.lstrip('-')
+                if abs_field in indexed_fields:
+                    sane_ordering.append(field)
+
+            ordering = sane_ordering
+        else:
+            ordering = filter(lambda x: x not in ['pk', '-pk', 'id', '-id'], ordering)
+
+        return ordering
 
     def get_results(self, request):
-        if not SEARCH_VAR in request.GET:
+        if SEARCH_VAR not in request.GET or (len(request.GET[SEARCH_VAR]) is 0 and len(request.GET.keys()) is 1):
             return super(SearchChangeList, self).get_results(request)
 
+        filters = self.custom_get_filters(request)
+
         # Note that pagination is 0-based, not 1-based.
-        sqs = SearchQuerySet(self.haystack_connection).models(self.model).auto_query(request.GET[SEARCH_VAR]).load_all()
+        sqs = SearchQuerySet(self.haystack_connection).models(self.model)
+        if request.GET[SEARCH_VAR]:
+            sqs = sqs.auto_query(request.GET[SEARCH_VAR])
+        if filters:
+            sqs = sqs.filter(**filters)
+
+        sqs = sqs.load_all()
+
+        # Set ordering.
+        ordering = self.get_ordering(request, sqs)
+        sqs = sqs.order_by(*ordering)
 
         paginator = Paginator(sqs, self.list_per_page)
         # Get the number of objects, with admin filters applied.
@@ -54,7 +160,7 @@ class SearchChangeList(ChangeList):
             result_list = paginator.page(self.page_num + 1).object_list
             # Grab just the Django models, since that's what everything else is
             # expecting.
-            result_list = [result.object for result in result_list]
+            result_list = [result.object for result in result_list if result]
         except InvalidPage:
             result_list = ()
 
@@ -70,89 +176,8 @@ class SearchModelAdminMixin(object):
     # haystack connection to use for searching
     haystack_connection = 'default'
 
-    @csrf_protect_m
-    def changelist_view(self, request, extra_context=None):
-        if not self.has_change_permission(request, None):
-            raise PermissionDenied
-
-        if not SEARCH_VAR in request.GET:
-            # Do the usual song and dance.
-            return super(SearchModelAdminMixin, self).changelist_view(request, extra_context)
-
-        # Do a search of just this model and populate a Changelist with the
-        # returned bits.
-        if not self.model in connections[self.haystack_connection].get_unified_index().get_indexed_models():
-            # Oops. That model isn't being indexed. Return the usual
-            # behavior instead.
-            return super(SearchModelAdminMixin, self).changelist_view(request, extra_context)
-
-        # So. Much. Boilerplate.
-        # Why copy-paste a few lines when you can copy-paste TONS of lines?
-        list_display = list(self.list_display)
-
-        kwargs = {
-            'haystack_connection': self.haystack_connection,
-            'request': request,
-            'model': self.model,
-            'list_display': list_display,
-            'list_display_links': self.list_display_links,
-            'list_filter': self.list_filter,
-            'date_hierarchy': self.date_hierarchy,
-            'search_fields': self.search_fields,
-            'list_select_related': self.list_select_related,
-            'list_per_page': self.list_per_page,
-            'list_editable': self.list_editable,
-            'model_admin': self
-        }
-
-        # Django 1.4 compatibility.
-        if hasattr(self, 'list_max_show_all'):
-            kwargs['list_max_show_all'] = self.list_max_show_all
-
-        changelist = SearchChangeList(**kwargs)
-        formset = changelist.formset = None
-        media = self.media
-
-        # Build the action form and populate it with available actions.
-        # Check actions to see if any are available on this changelist
-        actions = self.get_actions(request)
-        if actions:
-            action_form = self.action_form(auto_id=None)
-            action_form.fields['action'].choices = self.get_action_choices(request)
-        else:
-            action_form = None
-
-        selection_note = ungettext('0 of %(count)d selected',
-            'of %(count)d selected', len(changelist.result_list))
-        selection_note_all = ungettext('%(total_count)s selected',
-            'All %(total_count)s selected', changelist.result_count)
-
-        context = {
-            'module_name': force_text(self.model._meta.verbose_name_plural),
-            'selection_note': selection_note % {'count': len(changelist.result_list)},
-            'selection_note_all': selection_note_all % {'total_count': changelist.result_count},
-            'title': changelist.title,
-            'is_popup': changelist.is_popup,
-            'cl': changelist,
-            'media': media,
-            'has_add_permission': self.has_add_permission(request),
-            # More Django 1.4 compatibility
-            'root_path': getattr(self.admin_site, 'root_path', None),
-            'app_label': self.model._meta.app_label,
-            'action_form': action_form,
-            'actions_on_top': self.actions_on_top,
-            'actions_on_bottom': self.actions_on_bottom,
-            'actions_selection_counter': getattr(self, 'actions_selection_counter', 0),
-        }
-        context.update(extra_context or {})
-        request.current_app = self.admin_site.name
-        app_name, model_name = get_model_ct_tuple(self.model)
-        return render(request, self.change_list_template or [
-            'admin/%s/%s/change_list.html' % (app_name, model_name),
-            'admin/%s/change_list.html' % app_name,
-            'admin/change_list.html'
-        ], context)
-
+    def get_changelist(self, request, **kwargs):
+        return SearchChangeList
 
 class SearchModelAdmin(SearchModelAdminMixin, ModelAdmin):
     pass

@@ -128,7 +128,7 @@ class Command(BaseCommand):
         )
         parser.add_argument(
             '-a', '--age', type=int, default=DEFAULT_AGE,
-            help='Number of hours back to consider objects new.'
+            help='Number of minutes back to consider objects new.'
         )
         parser.add_argument(
             '-s', '--start', dest='start_date',
@@ -189,7 +189,7 @@ class Command(BaseCommand):
             LOG.setLevel(logging.INFO)
 
         if age is not None:
-            self.start_date = now() - timedelta(hours=int(age))
+            self.start_date = now() - timedelta(minutes=int(age))
 
         if start_date is not None:
             from dateutil.parser import parse as dateutil_parse
