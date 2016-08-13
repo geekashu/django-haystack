@@ -102,8 +102,7 @@ class SearchChangeList(ChangeList):
     def get_ordering(self, request, queryset):
         ordering = super(SearchChangeList, self).get_ordering(request, queryset)
 
-        if SEARCH_VAR not in request.GET or (len(request.GET[SEARCH_VAR]) is 0 and len(request.GET.keys()) is 1) \
-                or request.method == 'POST':
+        if SEARCH_VAR not in request.GET and len(request.GET.keys()) is 0 or request.method == 'POST':
             return ordering
 
         default_pk_field = getattr(settings, 'HAYSTACK_ADMIN_DEFAULT_ORDER_BY_FIELD', None)
@@ -129,14 +128,14 @@ class SearchChangeList(ChangeList):
         return ordering
 
     def get_results(self, request):
-        if SEARCH_VAR not in request.GET or (len(request.GET[SEARCH_VAR]) is 0 and len(request.GET.keys()) is 1):
+        if SEARCH_VAR not in request.GET and len(request.GET.keys()) is 0:
             return super(SearchChangeList, self).get_results(request)
 
         filters = self.custom_get_filters(request)
 
         # Note that pagination is 0-based, not 1-based.
         sqs = SearchQuerySet(self.haystack_connection).models(self.model)
-        if request.GET[SEARCH_VAR]:
+        if request.GET.get(SEARCH_VAR, False):
             sqs = sqs.auto_query(request.GET[SEARCH_VAR])
         if filters:
             sqs = sqs.filter(**filters)
