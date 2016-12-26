@@ -401,9 +401,8 @@ class SearchNode(tree.Node):
         """Parses an expression and determines the field and filter type."""
         parts = expression.split(FILTER_SEPARATOR)
         field = parts[0]
-
         if len(parts) == 1 or parts[-1] not in VALID_FILTERS:
-            filter_type = 'contains'
+            filter_type = 'content'
         else:
             filter_type = parts.pop()
 
@@ -1008,6 +1007,8 @@ class BaseSearchQuery(object):
         clone._raw_query = self._raw_query
         clone._raw_query_params = self._raw_query_params
         clone.spelling_query = self.spelling_query
+        clone._more_like_this = self._more_like_this
+        clone._mlt_instance = self._mlt_instance
 
         return clone
 

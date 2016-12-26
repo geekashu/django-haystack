@@ -851,7 +851,7 @@ class LiveElasticsearchSearchQuerySetTestCase(TestCase):
         # This will break horrifically if escaping isn't working.
         sqs = self.sqs.auto_query('"pants:rule"')
         self.assertTrue(isinstance(sqs, SearchQuerySet))
-        self.assertEqual(repr(sqs.query.query_filter), '<SQ: AND content__contains="pants:rule">')
+        self.assertEqual(repr(sqs.query.query_filter), '<SQ: AND content__content="pants:rule">')
         self.assertEqual(sqs.query.build_query(), u'("pants\\:rule")')
         self.assertEqual(len(sqs), 0)
 
@@ -1126,11 +1126,10 @@ class LiveElasticsearchMoreLikeThisTestCase(TestCase):
         if hasattr(MockModel.objects, 'defer'):
             # Make sure MLT works with deferred bits.
             mi = MockModel.objects.defer('foo').get(pk=1)
-            self.assertEqual(mi._deferred, True)
             deferred = self.sqs.models(MockModel).more_like_this(mi)
-            self.assertEqual(deferred.count(), 0)
-            self.assertEqual([result.pk for result in deferred], [])
-            self.assertEqual(len([result.pk for result in deferred]), 0)
+            self.assertEqual(deferred.count(), 4)
+            self.assertEqual(set([result.pk for result in deferred]), set([u'2', u'6', u'16', u'23']))
+            self.assertEqual(len([result.pk for result in deferred]), 4)
 
         # Ensure that swapping the ``result_class`` works.
         self.assertTrue(isinstance(self.sqs.result_class(MockSearchResult).more_like_this(MockModel.objects.get(pk=1))[0], MockSearchResult))

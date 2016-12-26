@@ -50,7 +50,7 @@ Elasticsearch
 * Stored (non-indexed) fields
 * Highlighting
 * Spatial search
-* Requires: elasticsearch-py > 1.0 & Elasticsearch 1.0+ (Elasticsearch 2.X is not supported yet `#1247 <https://github.com/django-haystack/django-haystack/issues/1247>`_)
+* Requires: elasticsearch-py > 1.0 & Elasticsearch 1.0+ (Neither Elasticsearch 2.X `#1247 <https://github.com/django-haystack/django-haystack/issues/1247>`_ nor Elasticsearch 5.X `#1383 <https://github.com/django-haystack/django-haystack/issues/1383>`_ are supported yet.)
 
 Whoosh
 ------
@@ -104,7 +104,7 @@ to develop a plugin following the lead of `xapian-haystack <https://pypi.python.
 that project can be developed and tested independently of the core Haystack release schedule.
 
 Sphinx
-~~~~~~
+------
 
 This backend has been requested multiple times over the years but does not yet have a volunteer maintainer. If
 you would like to work on it, please contact the Haystack maintainers so your project can be linked here and,
